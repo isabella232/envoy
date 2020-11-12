@@ -378,24 +378,7 @@ ClusterManagerImpl::ClusterManagerImpl(
     return std::make_shared<ThreadLocalClusterManagerImpl>(*this, dispatcher);
   });
 
-  // For active clusters that exist in bootstrap, post an empty thread local cluster update to
-  // populate them.
-  // TODO(mattklein123): It would be nice if we did not do this and instead all thread local cluster
-  // creation happened as part of the cluster init flow, however there are certain cases that depend
-  // on this behavior including route checking. It may be possible to fix static route checking to
-  // not depend on this behavior, but for now this is consistent with the way we have always done
-  // this so in the interest of minimal change it is not being done now.
-  for (auto& cluster : active_clusters_) {
-    // Skip posting the thread local cluster which is created as part of the thread local cluster
-    // manager constructor. See the TODO in that code for eventually cleaning this up.
-    if (local_cluster_name_ && local_cluster_name_.value() == cluster.first) {
-      continue;
-    }
-
-    // Avoid virtual call in the constructor. This only impacts tests. Remove this when fixing
-    // the above TODO.
-    postThreadLocalClusterUpdateNonVirtual(*cluster.second, ThreadLocalClusterUpdateParams());
-  }
+  // fixfix create thread local cluster here.
 
   // We can now potentially create the CDS API once the backing cluster exists.
   if (dyn_resources.has_cds_config()) {
@@ -531,14 +514,8 @@ void ClusterManagerImpl::onClusterInit(ClusterManagerCluster& cm_cluster) {
     params.per_priority_update_params_.emplace_back(host_set->priority(), host_set->hosts(),
                                                     HostVector{});
   }
-  // At this point the update is posted if either there are actual updates or the cluster has
-  // not been added yet. The latter can only happen with dynamic cluster as static clusters are
-  // added immediately.
-  // TODO(mattklein123): Per related TODOs we will see if we can centralize all logic so that
-  // clusters only get added in this path and all of the special casing can be removed.
-  if (!params.per_priority_update_params_.empty() || !cm_cluster.addedOrUpdated()) {
-    postThreadLocalClusterUpdate(cm_cluster, std::move(params));
-  }
+  ASSERT(!cm_cluster.addedOrUpdated());
+  postThreadLocalClusterUpdate(cm_cluster, std::move(params));
 }
 
 bool ClusterManagerImpl::scheduleUpdate(ClusterManagerCluster& cluster, uint32_t priority,
@@ -941,18 +918,10 @@ void ClusterManagerImpl::postThreadLocalDrainConnections(const Cluster& cluster,
 
 void ClusterManagerImpl::postThreadLocalClusterUpdateNonVirtual(
     ClusterManagerCluster& cm_cluster, ThreadLocalClusterUpdateParams&& params) {
-  const bool is_local_cluster = local_cluster_name_.has_value() &&
-                                local_cluster_name_.value() == cm_cluster.cluster().info()->name();
   bool add_or_update_cluster = false;
   if (!cm_cluster.addedOrUpdated()) {
     add_or_update_cluster = true;
     cm_cluster.setAddedOrUpdated();
-  }
-  if (is_local_cluster) {
-    // TODO(mattklein123): This is needed because of the special case of how local cluster is
-    // initialized in the thread local cluster manager constructor. This will all be cleaned up
-    // in a follow up.
-    add_or_update_cluster = false;
   }
 
   LoadBalancerFactorySharedPtr load_balancer_factory;
@@ -971,6 +940,7 @@ void ClusterManagerImpl::postThreadLocalClusterUpdateNonVirtual(
   tls_.runOnAllThreads(
       [info = cm_cluster.cluster().info(), params = std::move(params), add_or_update_cluster,
        load_balancer_factory](OptRef<ThreadLocalClusterManagerImpl> cluster_manager) {
+        ThreadLocalClusterManagerImpl::ClusterEntry* new_cluster = nullptr;
         if (add_or_update_cluster) {
           if (cluster_manager->thread_local_clusters_.count(info->name()) > 0) {
             ENVOY_LOG(debug, "updating TLS cluster {}", info->name());
@@ -978,15 +948,9 @@ void ClusterManagerImpl::postThreadLocalClusterUpdateNonVirtual(
             ENVOY_LOG(debug, "adding TLS cluster {}", info->name());
           }
 
-          auto thread_local_cluster = new ThreadLocalClusterManagerImpl::ClusterEntry(
+          new_cluster = new ThreadLocalClusterManagerImpl::ClusterEntry(
               *cluster_manager, info, load_balancer_factory);
-          cluster_manager->thread_local_clusters_[info->name()].reset(thread_local_cluster);
-          // TODO(mattklein123): It would be better if update callbacks were done after the initial
-          // cluster member is seeded, assuming it is. In the interest of minimal change this is
-          // deferred for a future change.
-          for (auto& cb : cluster_manager->update_callbacks_) {
-            cb->onClusterAddOrUpdate(*thread_local_cluster);
-          }
+          cluster_manager->thread_local_clusters_[info->name()].reset(new_cluster);
         }
 
         for (const auto& per_priority : params.per_priority_update_params_) {
@@ -994,6 +958,12 @@ void ClusterManagerImpl::postThreadLocalClusterUpdateNonVirtual(
               info->name(), per_priority.priority_, per_priority.update_hosts_params_,
               per_priority.locality_weights_, per_priority.hosts_added_,
               per_priority.hosts_removed_, per_priority.overprovisioning_factor_);
+        }
+
+        if (new_cluster != nullptr) {
+          for (auto& cb : cluster_manager->update_callbacks_) {
+            cb->onClusterAddOrUpdate(*new_cluster);
+          }
         }
       });
 }
@@ -1083,9 +1053,7 @@ ProtobufTypes::MessagePtr ClusterManagerImpl::dumpClusterConfigs() {
 ClusterManagerImpl::ThreadLocalClusterManagerImpl::ThreadLocalClusterManagerImpl(
     ClusterManagerImpl& parent, Event::Dispatcher& dispatcher)
     : parent_(parent), thread_local_dispatcher_(dispatcher) {
-  // If local cluster is defined then we need to initialize it first.
-  // TODO(mattklein123): Technically accessing active_clusters_ here is a race condition. This has
-  // been this way "forever" but should be fixed in a follow up.
+  /*// If local cluster is defined then we need to initialize it first.
   if (parent.localClusterName()) {
     ENVOY_LOG(debug, "adding TLS local cluster {}", parent.localClusterName().value());
     auto& local_cluster = parent.active_clusters_.at(parent.localClusterName().value());
@@ -1096,7 +1064,7 @@ ClusterManagerImpl::ThreadLocalClusterManagerImpl::ThreadLocalClusterManagerImpl
   local_priority_set_ =
       parent.localClusterName()
           ? &thread_local_clusters_[parent.localClusterName().value()]->priority_set_
-          : nullptr;
+          : nullptr;fixfix*/
 }
 
 ClusterManagerImpl::ThreadLocalClusterManagerImpl::~ThreadLocalClusterManagerImpl() {
